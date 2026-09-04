@@ -579,6 +579,9 @@ public:
   bool EndFrameCapture(DeviceOwnedWindow devWnd);
   bool DiscardFrameCapture(DeviceOwnedWindow devWnd);
 
+  void StartSlaveFrameCaptures(IFrameCapturer *excludeMaster);
+  void EndSlaveFrameCaptures(IFrameCapturer *excludeMaster);
+
   bool MatchClosestWindow(DeviceOwnedWindow &devWnd);
 
   bool IsActiveWindow(DeviceOwnedWindow devWnd);

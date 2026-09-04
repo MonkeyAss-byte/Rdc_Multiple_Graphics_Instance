@@ -14,9 +14,16 @@
 	<!-- version needed has extra .0 -->
 	<RenderDocLatestWin10SDKVersion Condition="'$(RenderDocLatestWin10SDKVersion)'!=''">$(RenderDocLatestWin10SDKVersion).0</RenderDocLatestWin10SDKVersion>
 
-	<!-- if we found the SDK version, use it. Otherwise fall back to 8.1. Since we require VS2015 which installed the 8.1 SDK at minimum we don't need to fallback any earlier (though we don't use anything from the 8.1 SDK either) -->
 	<WindowsTargetPlatformVersion Condition="'$(RenderDocLatestWin10SDKVersion)'!=''">$(RenderDocLatestWin10SDKVersion)</WindowsTargetPlatformVersion>
 	<WindowsTargetPlatformVersion Condition="'$(RenderDocLatestWin10SDKVersion)'==''">8.1</WindowsTargetPlatformVersion>
+
+	<!-- use the native toolset for each VS version -->
+	<PlatformToolset Condition="'$(VisualStudioVersion)' == '14.0'">v140</PlatformToolset>
+	<PlatformToolset Condition="'$(VisualStudioVersion)' == '15.0'">v141</PlatformToolset>
+	<PlatformToolset Condition="'$(VisualStudioVersion)' == '16.0'">v142</PlatformToolset>
+	<PlatformToolset Condition="'$(VisualStudioVersion)' == '17.0'">v143</PlatformToolset>
+	<PlatformToolset Condition="'$(VisualStudioVersion)' == '18.0'">v145</PlatformToolset>
+	<PlatformToolset Condition="'$(PlatformToolset)' == ''">v145</PlatformToolset>
 </PropertyGroup>
 
 </Project>

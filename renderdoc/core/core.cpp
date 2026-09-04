@@ -2146,6 +2146,32 @@ void RenderDoc::RemoveDeviceFrameCapturer(void *dev)
   m_DeviceFrameCapturers.erase(dev);
 }
 
+void RenderDoc::StartSlaveFrameCaptures(IFrameCapturer *excludeMaster)
+{
+  SCOPED_LOCK(m_CapturerListLock);
+  for(auto &it : m_DeviceFrameCapturers)
+  {
+    if(it.second && it.second != excludeMaster)
+    {
+      RDCLOG("[CascadeCapture] Starting slave capture on device: %#p", it.first);
+      it.second->StartFrameCapture(DeviceOwnedWindow(it.first, NULL));
+    }
+  }
+}
+
+void RenderDoc::EndSlaveFrameCaptures(IFrameCapturer *excludeMaster)
+{
+  SCOPED_LOCK(m_CapturerListLock);
+  for(auto &it : m_DeviceFrameCapturers)
+  {
+    if(it.second && it.second != excludeMaster)
+    {
+      RDCLOG("[CascadeCapture] Ending slave capture on device: %#p", it.first);
+      it.second->EndFrameCapture(DeviceOwnedWindow(it.first, NULL));
+    }
+  }
+}
+
 void RenderDoc::AddFrameCapturer(DeviceOwnedWindow devWnd, IFrameCapturer *cap)
 {
   if(IsReplayApp())

@@ -3341,7 +3341,10 @@ void WrappedVulkan::Present(DeviceOwnedWindow devWnd)
   }
 
   if(IsActiveCapturing(m_State) && !m_AppControlledCapture)
+  {
     RenderDoc::Inst().EndFrameCapture(devWnd);
+    RenderDoc::Inst().EndSlaveFrameCaptures(this);
+  }
 
   if(RenderDoc::Inst().ShouldTriggerCapture(m_FrameCounter) && IsBackgroundCapturing(m_State))
   {
@@ -3349,6 +3352,8 @@ void WrappedVulkan::Present(DeviceOwnedWindow devWnd)
 
     m_AppControlledCapture = false;
     m_CapturedFrames.back().frameNumber = m_FrameCounter;
+
+    RenderDoc::Inst().StartSlaveFrameCaptures(this);
   }
 }
 
