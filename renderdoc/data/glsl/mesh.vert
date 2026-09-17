@@ -33,7 +33,13 @@
 #endif
 
 #ifndef SECONDARY_TYPE
+#if SHADER_BASETYPE == 1
+#define SECONDARY_TYPE uvec4
+#elif SHADER_BASETYPE == 2
+#define SECONDARY_TYPE ivec4
+#else
 #define SECONDARY_TYPE vec4
+#endif
 #endif
 
 // This function is mostly duplicated between 'mesh.hlsl' and 'mesh.vert'.
@@ -193,6 +199,30 @@ void main(void)
   gl_Position.xy += Mesh.pointSpriteSize.xy * 0.01f * psprite[VERTEX_ID % 4] * gl_Position.w;
   vsout_secondary = vec4(secondary);
   vsout_norm = vec4(0, 0, 1, 1);
+
+  if(Mesh.displayFormat == MESHDISPLAY_BONE_INDEX)
+  {
+    uint idx = uint(abs(secondary.x) + 0.5);
+    float hue = fract(float(idx) * 0.618033988749895);
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(vec3(hue) + K.xyz) * 6.0 - K.www);
+    vec3 rgb = 0.95 * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), 0.85);
+    vsout_secondary = vec4(rgb, 1.0);
+  }
+  else if(Mesh.displayFormat == MESHDISPLAY_BONE_COUNT)
+  {
+    int count = 0;
+    if(secondary.x > 0.001) count++;
+    if(secondary.y > 0.001) count++;
+    if(secondary.z > 0.001) count++;
+    if(secondary.w > 0.001) count++;
+
+    if(count == 1)      vsout_secondary = vec4(0.0, 0.4, 1.0, 1.0);
+    else if(count == 2) vsout_secondary = vec4(0.1, 0.85, 0.2, 1.0);
+    else if(count == 3) vsout_secondary = vec4(1.0, 0.8, 0.0, 1.0);
+    else if(count >= 4) vsout_secondary = vec4(1.0, 0.15, 0.1, 1.0);
+    else                vsout_secondary = vec4(0.2, 0.2, 0.2, 1.0);
+  }
 
 #ifdef VULKAN
   if(Mesh.displayFormat == MESHDISPLAY_MESHLET)

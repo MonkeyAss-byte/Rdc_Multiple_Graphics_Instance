@@ -35,6 +35,7 @@
 #include "strings/string_utils.h"
 #include "vk_debug.h"
 #include "vk_replay.h"
+#include "mumu_gles_interceptor.h"
 
 #include "stb/stb_image_write.h"
 
@@ -174,6 +175,7 @@ WrappedVulkan::WrappedVulkan()
   else
   {
     m_State = CaptureState::BackgroundCapturing;
+    MuMuGLESInterceptor::Inst().Initialise();
   }
 
   m_StructuredFile = m_StoredStructuredData = new SDFile;
@@ -3192,6 +3194,13 @@ bool WrappedVulkan::EndFrameCapture(DeviceOwnedWindow devWnd)
   m_CaptureFailure = false;
 
   RenderDoc::Inst().FinishCaptureWriting(rdc, m_CapturedFrames.back().frameNumber);
+
+  rdcarray<CaptureData> caps = RenderDoc::Inst().GetCaptures();
+  if(!caps.empty())
+  {
+    MuMuGLESInterceptor::Inst().ExportManifest(caps.back().path);
+  }
+  MuMuGLESInterceptor::Inst().ResetFrame();
 
   m_State = CaptureState::BackgroundCapturing;
 

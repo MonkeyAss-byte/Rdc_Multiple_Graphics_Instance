@@ -24,17 +24,24 @@
 
 #include "BufferViewer.h"
 #include <float.h>
+#include <set>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFontDatabase>
+#include <QFormLayout>
 #include <QItemSelection>
+#include <QLabel>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QMutexLocker>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QTimer>
 #include <QToolTip>
+#include <QVBoxLayout>
 #include <QtMath>
 #include "Code/QRDUtils.h"
 #include "Code/Resources.h"
@@ -45,6 +52,12 @@
 #include "Windows/Dialogs/AxisMappingDialog.h"
 #include "Windows/Dialogs/CameraControlsDialog.h"
 #include "ui_BufferViewer.h"
+
+#if defined(WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 struct FixedVarTag
 {
@@ -2604,7 +2617,8 @@ BufferViewer::BufferViewer(ICaptureContext &ctx, bool meshview, QWidget *parent)
 
   ui->visualisation->clear();
   ui->visualisation->addItems(
-      {tr("None"), tr("Solid Colour"), tr("Flat Shaded"), tr("Secondary"), tr("Exploded")});
+      {tr("None"), tr("Solid Colour"), tr("Flat Shaded"), tr("Secondary"), tr("Exploded"),
+       tr("Bone Index"), tr("Bone Weight"), tr("Bone Count")});
   ui->visualisation->adjustSize();
   ui->visualisation->setCurrentIndex(0);
 
@@ -2859,6 +2873,48 @@ void BufferViewer::SetupMeshView()
   ui->outputTabs->setWindowTitle(tr("Preview"));
   ui->dockarea->addToolWindow(ui->outputTabs, ToolWindowManager::EmptySpace);
   ui->dockarea->setToolWindowProperties(ui->outputTabs, ToolWindowManager::HideCloseButton);
+
+  // Initialize bone floating HUD
+  m_BoneHud = new QFrame(ui->render);
+  m_BoneHud->setAttribute(Qt::WA_NativeWindow);
+  m_BoneHud->setAttribute(Qt::WA_ShowWithoutActivating);
+  m_BoneHud->setAttribute(Qt::WA_TransparentForMouseEvents);
+  m_BoneHud->setStyleSheet(lit(
+      "QFrame {"
+      "  background-color: rgba(18, 22, 30, 235);"
+      "  border: 1px solid rgba(0, 180, 255, 180);"
+      "  border-radius: 6px;"
+      "  padding: 4px;"
+      "}"));
+
+  QVBoxLayout *hudLayout = new QVBoxLayout(m_BoneHud);
+  hudLayout->setContentsMargins(6, 6, 6, 6);
+  hudLayout->setSpacing(2);
+
+  m_BoneHudText = new QLabel(m_BoneHud);
+  m_BoneHudText->setAttribute(Qt::WA_TransparentForMouseEvents);
+  m_BoneHudText->setTextFormat(Qt::RichText);
+  hudLayout->addWidget(m_BoneHudText);
+
+#if defined(WIN32)
+  HWND hwnd = (HWND)m_BoneHud->winId();
+  if(hwnd)
+  {
+    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+    SetWindowLongPtr(hwnd, GWL_STYLE, style | WS_CLIPSIBLINGS);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
+#endif
+
+  m_BoneHud->setVisible(false);
+
+  QObject::connect(ui->render, &CustomPaintWidget::resize, [this](QResizeEvent *) {
+    if(m_BoneHud)
+    {
+      m_BoneHud->move(12, 12);
+      m_BoneHud->raise();
+    }
+  });
 
   ui->inTable->setFrameShape(QFrame::NoFrame);
   ui->dockarea->addToolWindow(
@@ -3315,6 +3371,12 @@ void BufferViewer::FillScrolls(PopulateBufferData *bufdata)
 
 void BufferViewer::OnEventChanged(uint32_t eventId)
 {
+  m_PickedVertex = -1;
+  m_PickedRow = -1;
+  m_PickedVertexId = 0;
+  if(m_BoneConfig.enabled)
+    UpdateBoneBufferData();
+
   PopulateBufferData *bufdata = new PopulateBufferData;
 
   m_Sequence++;
@@ -4734,6 +4796,30 @@ void BufferViewer::UI_ConfigureVertexPipeFormats()
       }
     }
 
+    if(m_BoneConfig.enabled && m_BoneConfig.bufferId != ResourceId() &&
+       (m_Config.visualisationMode == Visualisation::BoneIndex ||
+        m_Config.visualisationMode == Visualisation::BoneWeight ||
+        m_Config.visualisationMode == Visualisation::BoneCount))
+    {
+      m_InSecondary.instanced = false;
+      m_InSecondary.instStepRate = 1;
+      m_InSecondary.vertexResourceId = m_BoneConfig.bufferId;
+      m_InSecondary.vertexByteStride = m_BoneConfig.stride;
+      m_InSecondary.vertexByteSize = 0;
+      m_InSecondary.showAlpha = false;
+
+      if(m_Config.visualisationMode == Visualisation::BoneIndex)
+      {
+        m_InSecondary.vertexByteOffset = m_BoneConfig.indexOffset;
+        m_InSecondary.format = m_BoneConfig.indexFormat;
+      }
+      else
+      {
+        m_InSecondary.vertexByteOffset = m_BoneConfig.weightOffset;
+        m_InSecondary.format = m_BoneConfig.weightFormat;
+      }
+    }
+
     const BufferConfiguration &out1Config = m_ModelOut1->getConfig();
 
     m_Out1Position = MeshFormat();
@@ -5006,7 +5092,7 @@ void BufferViewer::render_clicked(QMouseEvent *e)
 
   curpos *= ui->render->devicePixelRatioF();
 
-  if((e->buttons() & Qt::RightButton) && m_Output)
+  if((e->button() == Qt::RightButton || (e->buttons() & Qt::RightButton)) && m_Output)
   {
     QPointer<BufferViewer> me(this);
 
@@ -5034,9 +5120,25 @@ void BufferViewer::render_clicked(QMouseEvent *e)
           BufferItemModel *model = currentBufferModel();
 
           if(model && row >= 0 && row < model->rowCount())
+          {
             ScrollToRow(currentTable(), row);
+            currentTable()->selectRow(row);
+          }
 
           SyncViews(currentTable(), true, true);
+          UpdateHighlightVerts();
+
+          if(m_BoneConfig.enabled)
+          {
+            m_PickedVertex = row;
+            m_PickedRow = row;
+            bool ok = false;
+            uint32_t vtxId = m_ModelIn ? m_ModelIn->data(m_ModelIn->index(row, 1)).toUInt(&ok) : 0;
+            m_PickedVertexId = ok ? vtxId : vertSelected;
+            UpdateBoneHudText();
+          }
+
+          INVOKE_MEMFN(RT_UpdateAndDisplay);
         });
       }
     });
@@ -5599,7 +5701,11 @@ void BufferViewer::RT_UpdateAndDisplay(IReplayController *)
     m_Output->SetMeshDisplay(m_Config);
   }
 
-  GUIInvoke::call(this, [this]() { ui->render->update(); });
+  GUIInvoke::call(this, [this]() {
+    ui->render->update();
+    if(m_BoneHud && m_BoneHud->isVisible())
+      m_BoneHud->raise();
+  });
 }
 
 QPushButton *BufferViewer::MakePreviousPageButton()
@@ -5896,6 +6002,30 @@ void BufferViewer::data_selected(const QItemSelection &selected, const QItemSele
 
     SyncViews(view, true, false);
 
+    INVOKE_MEMFN(RT_UpdateAndDisplay);
+
+    if(m_BoneConfig.enabled && m_CurStage == MeshDataStage::VSIn)
+    {
+      QModelIndexList indices = selected.indexes();
+      if(!indices.isEmpty())
+      {
+        int row = indices.first().row();
+        m_PickedVertex = row;
+        m_PickedRow = row;
+        bool ok = false;
+        uint32_t vtxId = m_ModelIn ? m_ModelIn->data(m_ModelIn->index(row, 1)).toUInt(&ok) : 0;
+        m_PickedVertexId = ok ? vtxId : (uint32_t)row;
+        UpdateBoneHudText();
+      }
+    }
+  }
+  else
+  {
+    UpdateHighlightVerts();
+    m_PickedVertex = -1;
+    m_PickedRow = -1;
+    m_PickedVertexId = 0;
+    UpdateBoneHudText();
     INVOKE_MEMFN(RT_UpdateAndDisplay);
   }
 }
@@ -6999,19 +7129,29 @@ void BufferViewer::UpdateHighlightVerts()
   m_Config.highlightVert = ~0U;
 
   if(ui->highlightVerts->isHidden() || !ui->highlightVerts->isChecked())
+  {
+    UpdateBoneHudText();
     return;
+  }
 
   RDTableView *table = currentTable();
 
   if(!table)
+  {
+    UpdateBoneHudText();
     return;
+  }
 
   QModelIndexList selected = table->selectionModel()->selectedRows();
 
   if(selected.empty())
+  {
+    UpdateBoneHudText();
     return;
+  }
 
   m_Config.highlightVert = selected[0].row();
+  UpdateBoneHudText();
 }
 
 void BufferViewer::UpdateStageDataControls()
@@ -7100,6 +7240,8 @@ void BufferViewer::on_outputTabs_currentChanged(int index)
 
   UpdateCurrentMeshConfig();
 
+  UpdateBoneHudText();
+
   INVOKE_MEMFN(RT_UpdateAndDisplay);
 }
 
@@ -7174,9 +7316,441 @@ void BufferViewer::on_wireframeRender_toggled(bool checked)
   INVOKE_MEMFN(RT_UpdateAndDisplay);
 }
 
+static Visualisation GetVisModeFromCombo(QComboBox *combo)
+{
+  QString text = combo->currentText();
+  if(text == QObject::tr("Solid Colour"))
+    return Visualisation::Solid;
+  if(text == QObject::tr("Flat Shaded"))
+    return Visualisation::Lit;
+  if(text == QObject::tr("Secondary"))
+    return Visualisation::Secondary;
+  if(text == QObject::tr("Exploded"))
+    return Visualisation::Explode;
+  if(text == QObject::tr("Meshlet"))
+    return Visualisation::Meshlet;
+  if(text == QObject::tr("Bone Index"))
+    return Visualisation::BoneIndex;
+  if(text == QObject::tr("Bone Weight"))
+    return Visualisation::BoneWeight;
+  if(text == QObject::tr("Bone Count"))
+    return Visualisation::BoneCount;
+  return Visualisation::NoSolid;
+}
+
+void BufferViewer::on_boneConfigBtn_clicked()
+{
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Bone Stream Configuration"));
+  dialog.setMinimumWidth(550);
+
+  QVBoxLayout *layout = new QVBoxLayout(&dialog);
+  QFormLayout *form = new QFormLayout();
+
+  // 1. Buffer Combo
+  QComboBox *bufferCombo = new QComboBox(&dialog);
+  uint32_t vtxCount = GetMeshVertexCount();
+  uint32_t idxCount = GetMeshIndexCount();
+
+  int defaultIndex = 0;
+  QList<ResourceId> addedIds;
+
+  // First: Add vertex buffers bound in the current draw pipeline (Current Event)
+  const rdcarray<BoundVBuffer> &vbs = m_Ctx.CurPipelineState().GetVBuffers();
+  for(int slot = 0; slot < vbs.count(); slot++)
+  {
+    ResourceId rId = vbs[slot].resourceId;
+    if(rId == ResourceId() || addedIds.contains(rId))
+      continue;
+
+    addedIds.append(rId);
+    BufferDescription *buf = m_Ctx.GetBuffer(rId);
+    uint64_t length = buf ? buf->length : 0;
+    QString name = m_Ctx.GetResourceName(rId);
+
+    uint32_t strideV = (vtxCount > 0) ? (uint32_t)(length / vtxCount) : 0;
+    bool matchV = (vtxCount > 0 && (length % vtxCount == 0) && strideV >= 4 && strideV <= 256);
+
+    uint32_t strideI = (idxCount > 0) ? (uint32_t)(length / idxCount) : 0;
+    bool matchI = (idxCount > 0 && (length % idxCount == 0) && strideI >= 4 && strideI <= 256);
+
+    QString text;
+    if(matchV)
+    {
+      text = QString(lit("[MATCH %1B (Per-Vertex, Slot %2)] Buffer %3: %4 (%5 bytes)"))
+                 .arg(strideV)
+                 .arg(slot)
+                 .arg(ToQStr(rId))
+                 .arg(name)
+                 .arg(length);
+    }
+    else if(matchI)
+    {
+      text = QString(lit("[MATCH %1B (Per-Index, Slot %2)] Buffer %3: %4 (%5 bytes)"))
+                 .arg(strideI)
+                 .arg(slot)
+                 .arg(ToQStr(rId))
+                 .arg(name)
+                 .arg(length);
+    }
+    else
+    {
+      text = QString(lit("[Event VB Slot %1] Buffer %2: %3 (%4 bytes)"))
+                 .arg(slot)
+                 .arg(ToQStr(rId))
+                 .arg(name)
+                 .arg(length);
+    }
+
+    bufferCombo->addItem(text, QVariant::fromValue(rId));
+
+    if(m_BoneConfig.bufferId == rId)
+      defaultIndex = bufferCombo->count() - 1;
+    else if(m_BoneConfig.bufferId == ResourceId() && (matchV || matchI) && defaultIndex == 0)
+      defaultIndex = bufferCombo->count() - 1;
+  }
+
+  // Second: Add all other buffers in capture as fallback
+  const rdcarray<BufferDescription> &allBuffers = m_Ctx.GetBuffers();
+  for(int i = 0; i < allBuffers.count(); i++)
+  {
+    const BufferDescription &buf = allBuffers[i];
+    if(addedIds.contains(buf.resourceId))
+      continue;
+
+    QString name = m_Ctx.GetResourceName(buf.resourceId);
+    uint32_t strideV = (vtxCount > 0) ? (uint32_t)(buf.length / vtxCount) : 0;
+    bool matchV = (vtxCount > 0 && (buf.length % vtxCount == 0) && strideV >= 4 && strideV <= 256);
+
+    uint32_t strideI = (idxCount > 0) ? (uint32_t)(buf.length / idxCount) : 0;
+    bool matchI = (idxCount > 0 && (buf.length % idxCount == 0) && strideI >= 4 && strideI <= 256);
+
+    QString text;
+    if(matchV)
+    {
+      text = QString(lit("[MATCH %1B (Per-Vertex)] Buffer %2: %3 (%4 bytes)"))
+                 .arg(strideV)
+                 .arg(ToQStr(buf.resourceId))
+                 .arg(name)
+                 .arg(buf.length);
+    }
+    else if(matchI)
+    {
+      text = QString(lit("[MATCH %1B (Per-Index)] Buffer %2: %3 (%4 bytes)"))
+                 .arg(strideI)
+                 .arg(ToQStr(buf.resourceId))
+                 .arg(name)
+                 .arg(buf.length);
+    }
+    else
+    {
+      text = QString(lit("Buffer %1: %2 (%3 bytes)"))
+                 .arg(ToQStr(buf.resourceId))
+                 .arg(name)
+                 .arg(buf.length);
+    }
+
+    bufferCombo->addItem(text, QVariant::fromValue(buf.resourceId));
+
+    if(m_BoneConfig.bufferId == buf.resourceId)
+      defaultIndex = bufferCombo->count() - 1;
+    else if(m_BoneConfig.bufferId == ResourceId() && (matchV || matchI) && defaultIndex == 0)
+      defaultIndex = bufferCombo->count() - 1;
+  }
+
+  form->addRow(tr("Bone Buffer:"), bufferCombo);
+
+  // 1.5 Addressing Mode Combo (Per-Vertex vs Per-Index)
+  QComboBox *addressingCombo = new QComboBox(&dialog);
+  addressingCombo->addItem(QString::fromUtf8("Auto Detect (\xe8\x87\xaa\xe5\x8a\xa8\xe8\xaf\x86\xe5\x88\xab)"));
+  addressingCombo->addItem(
+      QString::fromUtf8("\xe9\x80\x90\xe9\xa1\xb6\xe7\x82\xb9 Per-Vertex (%1 verts)").arg(vtxCount));
+  addressingCombo->addItem(
+      QString::fromUtf8("\xe9\x80\x90 Index Per-Index (%1 indices)").arg(idxCount));
+  if(m_BoneConfig.addressing == BoneStreamConfig::BoneAddressing::PerIndex)
+    addressingCombo->setCurrentIndex(2);
+  else
+    addressingCombo->setCurrentIndex(0);
+  form->addRow(tr("Addressing Mode:"), addressingCombo);
+
+  // 2. Presets
+  QComboBox *presetCombo = new QComboBox(&dialog);
+  presetCombo->addItem(tr("Preset 1: Float4 Weights (0) + UInt4 Indices (16) [Stride 32]"));
+  presetCombo->addItem(tr("Preset 2: Half4 Weights (0) + UInt8x4 Indices (8) [Stride 16]"));
+  presetCombo->addItem(tr("Preset 3: Float4 Weights (0) + UInt16x4 Indices (16) [Stride 24]"));
+  presetCombo->addItem(tr("Preset 4: UNorm8x4 Weights (0) + UInt8x4 Indices (4) [Stride 8]"));
+  presetCombo->addItem(tr("Custom"));
+  form->addRow(tr("Format Preset:"), presetCombo);
+
+  // 3. Stride & Offsets
+  QSpinBox *strideSpin = new QSpinBox(&dialog);
+  strideSpin->setRange(1, 1024);
+  strideSpin->setValue(m_BoneConfig.stride > 0 ? m_BoneConfig.stride : 32);
+
+  QLabel *strideCalcLabel = new QLabel(&dialog);
+  strideCalcLabel->setStyleSheet(lit("color: #00d0ff; font-style: italic; font-size: 11px;"));
+
+  QHBoxLayout *strideLayout = new QHBoxLayout();
+  strideLayout->addWidget(strideSpin);
+  strideLayout->addWidget(strideCalcLabel);
+  strideLayout->addStretch();
+  form->addRow(tr("Stride (Bytes):"), strideLayout);
+
+  QSpinBox *weightOffsetSpin = new QSpinBox(&dialog);
+  weightOffsetSpin->setRange(0, 1024);
+  weightOffsetSpin->setValue(m_BoneConfig.weightOffset);
+  form->addRow(tr("Weights Offset:"), weightOffsetSpin);
+
+  QSpinBox *indexOffsetSpin = new QSpinBox(&dialog);
+  indexOffsetSpin->setRange(0, 1024);
+  indexOffsetSpin->setValue(m_BoneConfig.indexOffset > 0 ? m_BoneConfig.indexOffset : 16);
+  form->addRow(tr("Indices Offset:"), indexOffsetSpin);
+
+  auto autoUpdateStride = [&]() {
+    ResourceId bufId = bufferCombo->currentData().value<ResourceId>();
+    BufferDescription *b = m_Ctx.GetBuffer(bufId);
+    uint64_t bLen = b ? b->length : 0;
+    if(bLen == 0)
+    {
+      strideCalcLabel->setText(QString());
+      return;
+    }
+
+    int modeIdx = addressingCombo->currentIndex();
+    uint32_t autoStride = 0;
+    bool isPerVertex = true;
+
+    if(modeIdx == 1)
+    {
+      isPerVertex = true;
+      if(vtxCount > 0)
+        autoStride = (uint32_t)(bLen / vtxCount);
+    }
+    else if(modeIdx == 2)
+    {
+      isPerVertex = false;
+      if(idxCount > 0)
+        autoStride = (uint32_t)(bLen / idxCount);
+    }
+    else
+    {
+      uint32_t sV = (vtxCount > 0) ? (uint32_t)(bLen / vtxCount) : 0;
+      bool matchV = (vtxCount > 0 && (bLen % vtxCount == 0) && sV >= 4 && sV <= 256);
+
+      uint32_t sI = (idxCount > 0) ? (uint32_t)(bLen / idxCount) : 0;
+      bool matchI = (idxCount > 0 && (bLen % idxCount == 0) && sI >= 4 && sI <= 256);
+
+      if(matchV && (!matchI || sV == 32 || sV == 16 || sV == 24 || sV == 8))
+      {
+        isPerVertex = true;
+        autoStride = sV;
+      }
+      else if(matchI)
+      {
+        isPerVertex = false;
+        autoStride = sI;
+      }
+      else if(vtxCount > 0 && sV > 0 && sV <= 256)
+      {
+        isPerVertex = true;
+        autoStride = sV;
+      }
+    }
+
+    if(autoStride > 0 && autoStride <= 256)
+    {
+      strideSpin->setValue(autoStride);
+      uint32_t divisor = isPerVertex ? vtxCount : idxCount;
+      QString modeName = isPerVertex ? QString::fromUtf8("\xe9\x80\x90\xe9\xa1\xb6\xe7\x82\xb9")
+                                     : QString::fromUtf8("\xe9\x80\x90 Index");
+      QString unitName = isPerVertex ? lit("verts") : lit("indices");
+
+      if(divisor > 0 && bLen % divisor == 0)
+      {
+        strideCalcLabel->setText(
+            QString(lit("(Auto %1: %2 B / %3 %4 = %5 B/elem)"))
+                .arg(modeName)
+                .arg(bLen)
+                .arg(divisor)
+                .arg(unitName)
+                .arg(autoStride));
+      }
+      else if(divisor > 0)
+      {
+        strideCalcLabel->setText(
+            QString(lit("(Est %1: %2 B / %3 %4 ~ %5 B/elem)"))
+                .arg(modeName)
+                .arg(bLen)
+                .arg(divisor)
+                .arg(unitName)
+                .arg(autoStride));
+      }
+
+      if(autoStride == 32)
+      {
+        presetCombo->setCurrentIndex(0);
+        weightOffsetSpin->setValue(0);
+        indexOffsetSpin->setValue(16);
+      }
+      else if(autoStride == 16)
+      {
+        presetCombo->setCurrentIndex(1);
+        weightOffsetSpin->setValue(0);
+        indexOffsetSpin->setValue(8);
+      }
+      else if(autoStride == 24)
+      {
+        presetCombo->setCurrentIndex(2);
+        weightOffsetSpin->setValue(0);
+        indexOffsetSpin->setValue(16);
+      }
+      else if(autoStride == 8)
+      {
+        presetCombo->setCurrentIndex(3);
+        weightOffsetSpin->setValue(0);
+        indexOffsetSpin->setValue(4);
+      }
+    }
+    else
+    {
+      strideCalcLabel->setText(QString());
+    }
+  };
+
+  QObject::connect(bufferCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int) {
+    autoUpdateStride();
+  });
+  QObject::connect(addressingCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int) {
+    autoUpdateStride();
+  });
+
+  if(bufferCombo->count() > 0)
+  {
+    bufferCombo->setCurrentIndex(defaultIndex);
+    autoUpdateStride();
+  }
+
+  QObject::connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int idx) {
+    if(idx == 0)
+    {
+      strideSpin->setValue(32);
+      weightOffsetSpin->setValue(0);
+      indexOffsetSpin->setValue(16);
+    }
+    else if(idx == 1)
+    {
+      strideSpin->setValue(16);
+      weightOffsetSpin->setValue(0);
+      indexOffsetSpin->setValue(8);
+    }
+    else if(idx == 2)
+    {
+      strideSpin->setValue(24);
+      weightOffsetSpin->setValue(0);
+      indexOffsetSpin->setValue(16);
+    }
+    else if(idx == 3)
+    {
+      strideSpin->setValue(8);
+      weightOffsetSpin->setValue(0);
+      indexOffsetSpin->setValue(4);
+    }
+  });
+
+  layout->addLayout(form);
+
+  QDialogButtonBox *buttonBox =
+      new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  buttonBox->button(QDialogButtonBox::Ok)->setText(tr("Apply & Bind"));
+  buttonBox->button(QDialogButtonBox::Cancel)->setText(tr("Cancel"));
+  layout->addWidget(buttonBox);
+
+  QObject::connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if(dialog.exec() == QDialog::Accepted)
+  {
+    ResourceId chosenId = bufferCombo->currentData().value<ResourceId>();
+    if(chosenId != ResourceId())
+    {
+      m_BoneConfig.bufferId = chosenId;
+      m_BoneConfig.stride = strideSpin->value();
+      m_BoneConfig.weightOffset = weightOffsetSpin->value();
+      m_BoneConfig.indexOffset = indexOffsetSpin->value();
+
+      if(addressingCombo->currentIndex() == 2)
+        m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerIndex;
+      else if(addressingCombo->currentIndex() == 1)
+        m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerVertex;
+      else
+      {
+        BufferDescription *b = m_Ctx.GetBuffer(chosenId);
+        uint64_t bLen = b ? b->length : 0;
+        if(vtxCount > 0 && bLen % vtxCount == 0)
+          m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerVertex;
+        else if(idxCount > 0 && bLen % idxCount == 0)
+          m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerIndex;
+        else
+          m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerVertex;
+      }
+
+      m_BoneConfig.enabled = (m_BoneConfig.bufferId != ResourceId());
+
+      int pIdx = presetCombo->currentIndex();
+      if(pIdx == 1)
+      {
+        m_BoneConfig.weightFormat.type = ResourceFormatType::Regular;
+        m_BoneConfig.weightFormat.compCount = 4;
+        m_BoneConfig.weightFormat.compByteWidth = 2;
+        m_BoneConfig.weightFormat.compType = CompType::Float;
+
+        m_BoneConfig.indexFormat.type = ResourceFormatType::Regular;
+        m_BoneConfig.indexFormat.compCount = 4;
+        m_BoneConfig.indexFormat.compByteWidth = 1;
+        m_BoneConfig.indexFormat.compType = CompType::UInt;
+      }
+      else if(pIdx == 3)
+      {
+        m_BoneConfig.weightFormat.type = ResourceFormatType::Regular;
+        m_BoneConfig.weightFormat.compCount = 4;
+        m_BoneConfig.weightFormat.compByteWidth = 1;
+        m_BoneConfig.weightFormat.compType = CompType::UNorm;
+
+        m_BoneConfig.indexFormat.type = ResourceFormatType::Regular;
+        m_BoneConfig.indexFormat.compCount = 4;
+        m_BoneConfig.indexFormat.compByteWidth = 1;
+        m_BoneConfig.indexFormat.compType = CompType::UInt;
+      }
+      else
+      {
+        m_BoneConfig.weightFormat.type = ResourceFormatType::Regular;
+        m_BoneConfig.weightFormat.compCount = 4;
+        m_BoneConfig.weightFormat.compByteWidth = 4;
+        m_BoneConfig.weightFormat.compType = CompType::Float;
+
+        m_BoneConfig.indexFormat.type = ResourceFormatType::Regular;
+        m_BoneConfig.indexFormat.compCount = 4;
+        m_BoneConfig.indexFormat.compByteWidth = (pIdx == 2 ? 2 : 4);
+        m_BoneConfig.indexFormat.compType = CompType::UInt;
+      }
+
+      UI_ConfigureFormats();
+      UpdateCurrentMeshConfig();
+      INVOKE_MEMFN(RT_UpdateAndDisplay);
+
+      m_PickedVertex = -1;
+      m_PickedRow = -1;
+      m_PickedVertexId = 0;
+      UpdateBoneBufferData();
+    }
+  }
+}
+
 void BufferViewer::on_visualisation_currentIndexChanged(int index)
 {
-  ui->wireframeRender->setEnabled(index > 0);
+  Visualisation visMode = GetVisModeFromCombo(ui->visualisation);
+
+  ui->wireframeRender->setEnabled(visMode != Visualisation::NoSolid);
 
   if(!ui->wireframeRender->isEnabled())
   {
@@ -7184,22 +7758,28 @@ void BufferViewer::on_visualisation_currentIndexChanged(int index)
     m_Config.wireframeDraw = true;
   }
 
-  bool explodeHidden = (index != (int)Visualisation::Explode);
+  bool explodeHidden = (visMode != Visualisation::Explode);
   ui->vtxExploderLabel->setHidden(explodeHidden);
   ui->vtxExploderSlider->setHidden(explodeHidden);
   ui->exploderReset->setHidden(explodeHidden);
   ui->exploderScaleLabel->setHidden(explodeHidden);
   ui->exploderScale->setHidden(explodeHidden);
-  // Because the vertex/prim highlights draw from a new, temporary vertex buffer,
-  // those vertex IDs (which determine the explode displacement) won't necessarily
-  // match the original mesh's IDs and exploded vertices.  Because of this, it seems
-  // cleanest to just avoid drawing the highlighted vert/prim with the explode
-  // visualisation (while also getting back a little room on the toolbar used by
-  // the extra exploder controls).
   ui->highlightVerts->setHidden(!explodeHidden);
   UpdateHighlightVerts();
 
-  m_Config.visualisationMode = (Visualisation)qMax(0, index);
+  m_Config.visualisationMode = visMode;
+
+  if((visMode == Visualisation::BoneIndex || visMode == Visualisation::BoneWeight ||
+      visMode == Visualisation::BoneCount) &&
+     (!m_BoneConfig.enabled || m_BoneConfig.bufferId == ResourceId()))
+  {
+    on_boneConfigBtn_clicked();
+    if(!m_BoneConfig.enabled || m_BoneConfig.bufferId == ResourceId())
+    {
+      ui->visualisation->setCurrentIndex(0);
+      return;
+    }
+  }
 
   m_ModelIn->setSecondaryColumn(m_ModelIn->secondaryColumn(),
                                 m_Config.visualisationMode == Visualisation::Secondary,
@@ -7211,6 +7791,8 @@ void BufferViewer::on_visualisation_currentIndexChanged(int index)
                                   m_Config.visualisationMode == Visualisation::Secondary,
                                   m_ModelOut2->secondaryAlpha());
 
+  UI_ConfigureFormats();
+  UpdateCurrentMeshConfig();
   INVOKE_MEMFN(RT_UpdateAndDisplay);
 }
 
@@ -7482,4 +8064,354 @@ void BufferViewer::on_autofitCamera_clicked()
   }
 
   INVOKE_MEMFN(RT_UpdateAndDisplay);
+}
+
+uint32_t BufferViewer::GetMeshIndexCount() const
+{
+  const ActionDescription *action = m_Ctx.CurAction();
+  return (action && action->numIndices > 0) ? action->numIndices : 0;
+}
+
+uint32_t BufferViewer::GetMeshVertexCount() const
+{
+  uint32_t vtxCount = 0;
+  const rdcarray<BoundVBuffer> &vbs = m_Ctx.CurPipelineState().GetVBuffers();
+  for(const BoundVBuffer &vb : vbs)
+  {
+    if(vb.byteStride > 0)
+    {
+      uint64_t bLen = vb.byteSize;
+      if(bLen == ~0ULL || bLen == 0)
+      {
+        BufferDescription *b = m_Ctx.GetBuffer(vb.resourceId);
+        bLen = b ? b->length : 0;
+      }
+      if(bLen > vb.byteOffset)
+      {
+        uint32_t count = (uint32_t)((bLen - vb.byteOffset) / vb.byteStride);
+        vtxCount = qMax(vtxCount, count);
+      }
+    }
+  }
+
+  if(vtxCount == 0 && m_ModelIn && m_ModelIn->rowCount() > 0)
+  {
+    uint32_t maxId = 0;
+    int limit = qMin(m_ModelIn->rowCount(), 20000);
+    for(int r = 0; r < limit; r++)
+    {
+      bool ok = false;
+      uint32_t id = m_ModelIn->data(m_ModelIn->index(r, 1)).toUInt(&ok);
+      if(ok && id > maxId)
+        maxId = id;
+    }
+    if(maxId > 0)
+      vtxCount = maxId + 1;
+  }
+
+  if(vtxCount == 0)
+    vtxCount = GetMeshIndexCount();
+
+  return vtxCount;
+}
+
+BufferViewer::VertexBoneInfo BufferViewer::UnpackVertexBoneInfo(uint64_t offset) const
+{
+  VertexBoneInfo info;
+  if(m_BoneBufferData.empty())
+    return info;
+
+  const byte *base = m_BoneBufferData.data();
+  const uint64_t dataSize = m_BoneBufferData.size();
+
+  // Unpack weights
+  uint64_t wOffset = offset + m_BoneConfig.weightOffset;
+  uint32_t wCompCount =
+      m_BoneConfig.weightFormat.compCount ? m_BoneConfig.weightFormat.compCount : 4;
+  uint32_t wByteWidth =
+      m_BoneConfig.weightFormat.compByteWidth ? m_BoneConfig.weightFormat.compByteWidth : 4;
+
+  for(uint32_t c = 0; c < 4 && c < wCompCount; c++)
+  {
+    uint64_t compOffset = wOffset + c * wByteWidth;
+    if(compOffset + wByteWidth > dataSize)
+      break;
+
+    const byte *ptr = base + compOffset;
+    if(m_BoneConfig.weightFormat.compType == CompType::Float)
+    {
+      if(wByteWidth == 4)
+        info.weights[c] = *(const float *)ptr;
+      else if(wByteWidth == 2)
+        info.weights[c] = (float)rdhalf::make(*(const uint16_t *)ptr);
+    }
+    else if(m_BoneConfig.weightFormat.compType == CompType::UNorm)
+    {
+      if(wByteWidth == 1)
+        info.weights[c] = float(*ptr) / 255.0f;
+      else if(wByteWidth == 2)
+        info.weights[c] = float(*(const uint16_t *)ptr) / 65535.0f;
+    }
+  }
+
+  // Unpack indices
+  uint64_t iOffset = offset + m_BoneConfig.indexOffset;
+  uint32_t iCompCount =
+      m_BoneConfig.indexFormat.compCount ? m_BoneConfig.indexFormat.compCount : 4;
+  uint32_t iByteWidth =
+      m_BoneConfig.indexFormat.compByteWidth ? m_BoneConfig.indexFormat.compByteWidth : 4;
+
+  for(uint32_t c = 0; c < 4 && c < iCompCount; c++)
+  {
+    uint64_t compOffset = iOffset + c * iByteWidth;
+    if(compOffset + iByteWidth > dataSize)
+      break;
+
+    const byte *ptr = base + compOffset;
+    if(iByteWidth == 1)
+      info.indices[c] = (uint32_t)(*ptr);
+    else if(iByteWidth == 2)
+      info.indices[c] = (uint32_t)(*(const uint16_t *)ptr);
+    else if(iByteWidth == 4)
+      info.indices[c] = *(const uint32_t *)ptr;
+  }
+
+  for(uint32_t c = 0; c < 4; c++)
+  {
+    info.weightSum += info.weights[c];
+    info.dotVal += info.weights[c] * (float)info.indices[c];
+    if(info.weights[c] > 1e-4f)
+      info.activeCount++;
+  }
+
+  return info;
+}
+
+void BufferViewer::AnalyzeBoneStream()
+{
+  m_TotalBoneCount = 0;
+  m_MinBoneId = 0;
+  m_MaxBoneId = 0;
+
+  if(m_BoneBufferData.empty() || m_BoneConfig.stride == 0)
+    return;
+
+  std::set<uint32_t> uniqueBones;
+  uint64_t numVerts = m_BoneBufferData.size() / m_BoneConfig.stride;
+
+  for(uint64_t v = 0; v < numVerts; v++)
+  {
+    uint64_t offset = v * m_BoneConfig.stride;
+    VertexBoneInfo info = UnpackVertexBoneInfo(offset);
+
+    for(uint32_t c = 0; c < 4; c++)
+    {
+      if(info.weights[c] > 1e-4f)
+      {
+        uniqueBones.insert(info.indices[c]);
+      }
+    }
+  }
+
+  if(uniqueBones.empty() && numVerts > 0)
+  {
+    for(uint64_t v = 0; v < numVerts; v++)
+    {
+      uint64_t offset = v * m_BoneConfig.stride;
+      VertexBoneInfo info = UnpackVertexBoneInfo(offset);
+      for(uint32_t c = 0; c < 4; c++)
+        uniqueBones.insert(info.indices[c]);
+    }
+  }
+
+  if(!uniqueBones.empty())
+  {
+    m_TotalBoneCount = (uint32_t)uniqueBones.size();
+    m_MinBoneId = *uniqueBones.begin();
+    m_MaxBoneId = *uniqueBones.rbegin();
+  }
+}
+
+void BufferViewer::UpdateBoneBufferData()
+{
+  if(!m_BoneConfig.enabled || m_BoneConfig.bufferId == ResourceId())
+  {
+    m_BoneBufferData.clear();
+    m_TotalBoneCount = 0;
+    UpdateBoneHudText();
+    return;
+  }
+
+  ResourceId bufId = m_BoneConfig.bufferId;
+  QPointer<BufferViewer> me(this);
+
+  m_Ctx.Replay().AsyncInvoke(lit("LoadBoneStream"), [this, me, bufId](IReplayController *r) {
+    if(!me)
+      return;
+
+    bytebuf data = r->GetBufferData(bufId, 0, 0);
+
+    GUIInvoke::call(this, [this, me, data = std::move(data)]() mutable {
+      if(!me)
+        return;
+
+      m_BoneBufferData = std::move(data);
+      if(m_BoneConfig.stride == 0)
+      {
+        uint32_t vtxCount = GetMeshVertexCount();
+        uint32_t idxCount = GetMeshIndexCount();
+        uint64_t bufSize = m_BoneBufferData.size();
+
+        if(m_BoneConfig.addressing == BoneStreamConfig::BoneAddressing::PerVertex && vtxCount > 0 &&
+           bufSize % vtxCount == 0)
+        {
+          m_BoneConfig.stride = (uint32_t)(bufSize / vtxCount);
+        }
+        else if(m_BoneConfig.addressing == BoneStreamConfig::BoneAddressing::PerIndex &&
+                idxCount > 0 && bufSize % idxCount == 0)
+        {
+          m_BoneConfig.stride = (uint32_t)(bufSize / idxCount);
+        }
+        else
+        {
+          if(vtxCount > 0 && bufSize % vtxCount == 0)
+          {
+            m_BoneConfig.stride = (uint32_t)(bufSize / vtxCount);
+            m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerVertex;
+          }
+          else if(idxCount > 0 && bufSize % idxCount == 0)
+          {
+            m_BoneConfig.stride = (uint32_t)(bufSize / idxCount);
+            m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerIndex;
+          }
+          else if(vtxCount > 0)
+          {
+            m_BoneConfig.stride = (uint32_t)(bufSize / vtxCount);
+            m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerVertex;
+          }
+          else if(idxCount > 0)
+          {
+            m_BoneConfig.stride = (uint32_t)(bufSize / idxCount);
+            m_BoneConfig.addressing = BoneStreamConfig::BoneAddressing::PerIndex;
+          }
+        }
+        if(m_BoneConfig.stride == 0)
+          m_BoneConfig.stride = 32;
+      }
+      AnalyzeBoneStream();
+      UpdateBoneHudText();
+    });
+  });
+}
+
+void BufferViewer::UpdateBoneHudText()
+{
+  if(!m_BoneHud || !m_BoneHudText)
+    return;
+
+  if(!m_BoneConfig.enabled || m_BoneConfig.bufferId == ResourceId() ||
+     m_CurStage != MeshDataStage::VSIn)
+  {
+    m_BoneHud->setVisible(false);
+    return;
+  }
+
+  m_BoneHud->setVisible(true);
+
+  // Check if a vertex is currently selected
+  uint32_t selectedRow = ~0U;
+  RDTableView *table = currentTable();
+  if(table && table->selectionModel())
+  {
+    QModelIndexList selRows = table->selectionModel()->selectedRows();
+    if(!selRows.isEmpty())
+      selectedRow = (uint32_t)selRows[0].row();
+  }
+  if(selectedRow == ~0U && m_Config.highlightVert != ~0U)
+  {
+    selectedRow = m_Config.highlightVert;
+  }
+  if(selectedRow == ~0U && m_PickedRow >= 0)
+  {
+    selectedRow = (uint32_t)m_PickedRow;
+  }
+
+  QString text;
+  text += lit("<div style='font-family: Consolas, monospace; font-size: 12px; color: #ffffff;'>");
+
+  // Feature 1: Total Bone Count (Camera HUD Top-Left)
+  text += lit("<div style='font-weight: bold; color: #00d0ff; font-size: 13px; margin-bottom: 4px;'>");
+  if(m_TotalBoneCount > 0)
+  {
+    text += QString::fromUtf8("\xe9\xaa\xa8\xe9\xaa\xbc\xe6\x80\xbb\xe6\x95\xb0: %1 (IDs: %2 ~ %3)")
+                .arg(m_TotalBoneCount)
+                .arg(m_MinBoneId)
+                .arg(m_MaxBoneId);
+  }
+  else
+  {
+    text += QString::fromUtf8("\xe9\xaa\xa8\xe9\xaa\xbc\xe6\x80\xbb\xe6\x95\xb0: 0 (\xe6\x9c\xaa\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0\xe9\xaa\xa8\xe9\xaa\xbc)");
+  }
+  text += lit("</div>");
+
+  // Divider
+  text += lit("<hr style='border: none; border-top: 1px solid rgba(0, 180, 255, 100); margin: 4px 0;'/>");
+
+  // Feature 2: Selected Vertex Bone References
+  if(selectedRow != ~0U)
+  {
+    bool ok = false;
+    uint32_t vtxId = m_ModelIn ? m_ModelIn->data(m_ModelIn->index((int)selectedRow, 1)).toUInt(&ok) : 0;
+    if(!ok)
+      vtxId = selectedRow;
+
+    uint64_t offset = 0;
+    if(m_BoneConfig.addressing == BoneStreamConfig::BoneAddressing::PerIndex)
+      offset = (uint64_t)selectedRow * m_BoneConfig.stride;
+    else
+      offset = (uint64_t)vtxId * m_BoneConfig.stride;
+
+    VertexBoneInfo info = UnpackVertexBoneInfo(offset);
+
+    QString modeStr = (m_BoneConfig.addressing == BoneStreamConfig::BoneAddressing::PerIndex)
+                          ? QString::fromUtf8("\xe9\x80\x90 Index")
+                          : QString::fromUtf8("\xe9\x80\x90\xe9\xa1\xb6\xe7\x82\xb9");
+
+    text += QString(lit("<div style='color: #ffdd55; font-weight: bold; margin-bottom: 3px;'>")) +
+            QString::fromUtf8("\xe9\x80\x89\xe4\xb8\xad\xe9\xa1\xb6\xe7\x82\xb9: #%1 (Row: %2, %3)</div>")
+                .arg(vtxId)
+                .arg(selectedRow)
+                .arg(modeStr);
+
+    text += lit("<div style='margin-left: 4px;'>");
+    for(int i = 0; i < 4; i++)
+    {
+      QString col = info.weights[i] > 1e-4f ? lit("#88ff88") : lit("#888888");
+      text += QString(lit("<div style='color: %1;'>&bull; ")).arg(col) +
+              QString::fromUtf8("\xe9\xaa\xa8\xe9\xaa\xbc %1: \xe6\x9d\x83\xe9\x87\x8d %2 (%3%)</div>")
+                  .arg(info.indices[i], 3)
+                  .arg(QString::number(info.weights[i], 'f', 3))
+                  .arg(QString::number(info.weights[i] * 100.0f, 'f', 1));
+    }
+    text += lit("</div>");
+
+    text += lit("<div style='margin-top: 4px; color: #cccccc; font-size: 11px;'>");
+    text += QString::fromUtf8("\xe6\x9c\x89\xe6\x95\x88\xe9\xaa\xa8\xe9\xaa\xbc: <b style='color: #ffffff;'>%1</b> | \xe6\x9d\x83\xe9\x87\x8d\xe5\x92\x8c: <b style='color: #ffffff;'>%2</b> | Dot: <b style='color: #ffaa55;'>%3</b>")
+                .arg(info.activeCount)
+                .arg(QString::number(info.weightSum, 'f', 3))
+                .arg(QString::number(info.dotVal, 'f', 2));
+    text += lit("</div>");
+  }
+  else
+  {
+    text += QString(lit("<div style='color: #aaaaaa; font-style: italic; font-size: 11px;'>")) +
+            QString::fromUtf8("[\xe6\x9c\xaa\xe9\x80\x89\xe4\xb8\xad\xe9\xa1\xb6\xe7\x82\xb9: \xe7\x82\xb9\xe5\x87\xbb\xe8\xa1\xa8\xe6\xa0\xbc\xe6\x88\x96\xe5\x8f\xb3\xe9\x94\xae 3D \xe9\xa1\xb6\xe7\x82\xb9\xe6\x9f\xa5\xe7\x9c\x8b\xe8\xaf\xa6\xe6\x83\x85]</div>");
+  }
+
+  text += lit("</div>");
+
+  m_BoneHudText->setText(text);
+  m_BoneHud->adjustSize();
+  m_BoneHud->move(12, 12);
+  m_BoneHud->raise();
 }

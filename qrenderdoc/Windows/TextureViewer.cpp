@@ -31,6 +31,10 @@
 #include <QFontDatabase>
 #include <QItemDelegate>
 #include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QRegularExpression>
+#include <QRegularExpressionMatch>
 #include <QMenu>
 #include <QPainter>
 #include <QPointer>
@@ -659,7 +663,17 @@ TextureViewer::TextureViewer(ICaptureContext &ctx, QWidget *parent)
                          tr("Quad Overdraw (Pass)"), tr("Quad Overdraw (Draw)"),
                          tr("Triangle Size (Pass)"), tr("Triangle Size (Draw)")});
 
-  ui->textureListFilter->addItems({QString(), tr("Textures"), tr("Render Targets")});
+  ui->textureListFilter->addItems(
+      {QString(), tr("Textures"), tr("Render Targets"), tr("📱 Mobile Compressed")});
+
+  m_MobileVramBtn = new QToolButton(this);
+  m_MobileVramBtn->setText(tr("📱 Mobile VRAM"));
+  m_MobileVramBtn->setToolTip(
+      tr("View Android Mobile Compressed Texture Formats and VRAM Savings Report"));
+  m_MobileVramBtn->setAutoRaise(true);
+  m_MobileVramBtn->setVisible(false);
+  QObject::connect(m_MobileVramBtn, &QToolButton::clicked, this, &TextureViewer::ShowMobileVramReport);
+  ui->actionToolbar->layout()->addWidget(m_MobileVramBtn);
 
   ui->textureList->setColumns({tr("Texture Name"), tr("Width"), tr("Height"), tr("Depth/Slices"),
                                tr("Mips Count"), tr("Format"), tr("Go")});
@@ -1279,6 +1293,40 @@ void TextureViewer::UI_UpdateTextureDetails()
 
   if(viewCast != CompType::Typeless)
     status += tr(" Viewed as %1").arg(ToQStr(viewCast));
+
+  AndroidTexInfo compInfo;
+  if(GetAndroidTexInfo(current.resourceId, current.width, current.height, compInfo))
+  {
+    QString compStr = compInfo.androidBytes >= 1024 * 1024
+                          ? QString::number((double)compInfo.androidBytes / (1024.0 * 1024.0), 'f', 2) + lit(" MB")
+                          : QString::number((double)compInfo.androidBytes / 1024.0, 'f', 1) + lit(" KB");
+    QString pcStr = compInfo.pcBytes >= 1024 * 1024
+                        ? QString::number((double)compInfo.pcBytes / (1024.0 * 1024.0), 'f', 2) + lit(" MB")
+                        : QString::number((double)compInfo.pcBytes / 1024.0, 'f', 1) + lit(" KB");
+
+    status += QFormatStr(" | 📱 [Android: %1 | VRAM: %2 (PC: %3, Saved: %4%)]")
+                  .arg(compInfo.format)
+                  .arg(compStr)
+                  .arg(pcStr)
+                  .arg(compInfo.savingsPercent, 0, 'f', 1);
+
+    ui->texStatusFormat->setToolTip(
+        QFormatStr("📱 Android Mobile Compressed Texture\n"
+                   "-----------------------------------\n"
+                   "Original Format:  %1\n"
+                   "Mobile VRAM:      %2\n"
+                   "PC Emulated VRAM: %3\n"
+                   "Memory Saved:     %4%\n"
+                   "(Original compressed asset preserved from MuMu GLES)")
+            .arg(compInfo.format)
+            .arg(compStr)
+            .arg(pcStr)
+            .arg(compInfo.savingsPercent, 0, 'f', 1));
+  }
+  else
+  {
+    ui->texStatusFormat->setToolTip(QString());
+  }
 
   ui->texStatusFormat->setText(status);
 }
@@ -2924,6 +2972,8 @@ void TextureViewer::OnCaptureLoaded()
 {
   Reset();
 
+  LoadAndroidTexManifest();
+
   WindowingData renderData = ui->render->GetWidgetWindowingData();
   WindowingData contextData = ui->pixelContext->GetWidgetWindowingData();
 
@@ -3034,12 +3084,34 @@ void TextureViewer::refreshTextureList()
   on_textureListFilter_currentIndexChanged(ui->textureListFilter->currentIndex());
 }
 
-void addToRoot(RDTreeWidgetItem *root, const TextureDescription &t)
+void TextureViewer::addToRoot(RDTreeWidgetItem *root, const TextureDescription &t)
 {
   const QVariant &res = QVariant::fromValue(t.resourceId);
+  QString fmtName = t.format.Name();
+
+  AndroidTexInfo compInfo;
+  if(GetAndroidTexInfo(t.resourceId, t.width, t.height, compInfo))
+  {
+    fmtName += QFormatStr(" [📱 %1]").arg(compInfo.format);
+  }
+
   RDTreeWidgetItem *child =
       new RDTreeWidgetItem({res, t.width, t.height, (3 == t.dimension ? t.depth : t.arraysize),
-                            t.mips, t.format.Name(), QString()});
+                            t.mips, fmtName, QString()});
+
+  if(!compInfo.format.isEmpty())
+  {
+    child->setToolTip(
+        5, QFormatStr("Android Mobile Compressed Texture:\n"
+                      "Format:           %1\n"
+                      "Mobile VRAM:      %2 KB\n"
+                      "PC Emulated VRAM: %3 KB\n"
+                      "Saved on Mobile:  %4%")
+               .arg(compInfo.format)
+               .arg(compInfo.androidBytes / 1024)
+               .arg(compInfo.pcBytes / 1024)
+               .arg(compInfo.savingsPercent, 0, 'f', 1));
+  }
 
   child->setTag(res);
   root->addChild(child);
@@ -3067,6 +3139,12 @@ void TextureViewer::refreshTextureList(FilterType filterType, const QString &fil
       if((t.creationFlags & rtFlags))
         addToRoot(root, t);
     }
+    else if(filterType == FilterType::MobileCompressed)
+    {
+      AndroidTexInfo compInfo;
+      if(GetAndroidTexInfo(t.resourceId, t.width, t.height, compInfo))
+        addToRoot(root, t);
+    }
     else
     {
       if(filterStr.isEmpty())
@@ -3075,13 +3153,16 @@ void TextureViewer::refreshTextureList(FilterType filterType, const QString &fil
       }
       else
       {
+        AndroidTexInfo compInfo;
+        bool hasMobile = GetAndroidTexInfo(t.resourceId, t.width, t.height, compInfo);
         if(QString(m_Ctx.GetResourceName(t.resourceId)).contains(filterStr, Qt::CaseInsensitive) ||
            QString::number(t.width).contains(filterStr, Qt::CaseInsensitive) ||
            QString::number(t.height).contains(filterStr, Qt::CaseInsensitive) ||
            QString::number((3 == t.dimension ? t.depth : t.arraysize))
                .contains(filterStr, Qt::CaseInsensitive) ||
            QString::number(t.mips).contains(filterStr, Qt::CaseInsensitive) ||
-           QString(t.format.Name()).contains(filterStr, Qt::CaseInsensitive))
+           QString(t.format.Name()).contains(filterStr, Qt::CaseInsensitive) ||
+           (hasMobile && compInfo.format.contains(filterStr, Qt::CaseInsensitive)))
           addToRoot(root, t);
       }
     }
@@ -3100,6 +3181,14 @@ void TextureViewer::refreshTextureList(FilterType filterType, const QString &fil
 void TextureViewer::OnCaptureClosed()
 {
   Reset();
+
+  m_AndroidTexByRes.clear();
+  m_AndroidTexByDim.clear();
+  m_TotalAndroidVram = 0;
+  m_TotalPcVram = 0;
+  m_OverallSavingsPercent = 0.0f;
+  if(m_MobileVramBtn)
+    m_MobileVramBtn->setVisible(false);
 
   refreshTextureList();
 
@@ -4260,6 +4349,8 @@ void TextureViewer::on_textureListFilter_currentIndexChanged(int index)
     refreshTextureList(FilterType::Textures, QString());
   else if(ui->textureListFilter->currentIndex() == 2)
     refreshTextureList(FilterType::RenderTargets, QString());
+  else if(ui->textureListFilter->currentIndex() == 3)
+    refreshTextureList(FilterType::MobileCompressed, QString());
   else
     refreshTextureList(FilterType::String, ui->textureListFilter->currentText());
 }
@@ -4820,6 +4911,159 @@ void TextureViewer::customShaderModified(const QString &path)
   reloadCustomShaders(QString());
 
   recurse = false;
+}
+
+bool TextureViewer::GetAndroidTexInfo(ResourceId id, uint32_t width, uint32_t height,
+                                       AndroidTexInfo &outInfo) const
+{
+  // 1. Match by ResourceId string from companion manifest
+  QString idStr = ToQStr(id);
+  if(m_AndroidTexByRes.contains(idStr))
+  {
+    outInfo = m_AndroidTexByRes.value(idStr);
+    return true;
+  }
+
+  // 2. Fallback: Parse from resource custom name baked into capture
+  QString resName = m_Ctx.GetResourceName(id);
+  if(resName.contains(lit("[Android:")))
+  {
+    static QRegularExpression re(
+        lit("\\[Android:\\s*([A-Za-z0-9_]+)\\s*\\|\\s*VRAM:\\s*([0-9.]+)\\s*KB\\s*\\|\\s*Saved:\\s*([0-9.]+)%\\]"));
+    QRegularExpressionMatch match = re.match(resName);
+    if(match.hasMatch())
+    {
+      outInfo.format = match.captured(1);
+      outInfo.width = width;
+      outInfo.height = height;
+      outInfo.androidBytes = (uint64_t)(match.captured(2).toDouble() * 1024.0);
+      outInfo.pcBytes = (uint64_t)width * height * 4;
+      outInfo.savingsPercent = match.captured(3).toFloat();
+      return true;
+    }
+  }
+
+  // 3. Fallback: Match by dimensions (width, height)
+  auto dimKey = qMakePair(width, height);
+  if(m_AndroidTexByDim.contains(dimKey))
+  {
+    outInfo = m_AndroidTexByDim.value(dimKey);
+    return true;
+  }
+
+  return false;
+}
+
+void TextureViewer::LoadAndroidTexManifest()
+{
+  m_AndroidTexByRes.clear();
+  m_AndroidTexByDim.clear();
+  m_TotalAndroidVram = 0;
+  m_TotalPcVram = 0;
+  m_OverallSavingsPercent = 0.0f;
+
+  if(!m_Ctx.IsCaptureLoaded())
+    return;
+
+  QString capFile = QString::fromUtf8(m_Ctx.GetCaptureFilename().c_str());
+  QStringList candidatePaths;
+
+  candidatePaths << capFile + lit(".manifest.json");
+
+  QFileInfo fi(capFile);
+  candidatePaths << fi.absolutePath() + lit("/") + fi.fileName() + lit(".manifest.json");
+  candidatePaths << fi.absolutePath() + lit("/latest.manifest.json");
+  candidatePaths << lit("E:/Task/RDC_Res/") + fi.fileName() + lit(".manifest.json");
+  candidatePaths << lit("E:/Task/RDC_Res/latest.manifest.json");
+
+  QString foundPath;
+  for(const QString &p : candidatePaths)
+  {
+    if(QFile::exists(p))
+    {
+      foundPath = p;
+      break;
+    }
+  }
+
+  if(foundPath.isEmpty())
+    return;
+
+  QFile f(foundPath);
+  if(!f.open(QFile::ReadOnly | QFile::Text))
+    return;
+
+  QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+  f.close();
+
+  if(!doc.isObject())
+    return;
+
+  QJsonObject rootObj = doc.object();
+  QJsonArray texArr = rootObj.value(lit("textures")).toArray();
+
+  for(const QJsonValue &v : texArr)
+  {
+    QJsonObject obj = v.toObject();
+    AndroidTexInfo info;
+    info.format = obj.value(lit("format")).toString();
+    info.width = (uint32_t)obj.value(lit("width")).toInt();
+    info.height = (uint32_t)obj.value(lit("height")).toInt();
+    info.androidBytes = (uint64_t)obj.value(lit("androidVramBytes")).toVariant().toULongLong();
+    info.pcBytes = (uint64_t)obj.value(lit("pcVramBytes")).toVariant().toULongLong();
+    info.savingsPercent = (float)obj.value(lit("savingsPercent")).toDouble();
+
+    QString resIdStr = obj.value(lit("resourceId")).toString();
+    if(!resIdStr.isEmpty())
+      m_AndroidTexByRes[resIdStr] = info;
+
+    if(info.width > 0 && info.height > 0)
+      m_AndroidTexByDim[qMakePair(info.width, info.height)] = info;
+  }
+
+  QJsonObject summaryObj = rootObj.value(lit("summary")).toObject();
+  m_TotalAndroidVram = summaryObj.value(lit("totalAndroidVramBytes")).toVariant().toULongLong();
+  m_TotalPcVram = summaryObj.value(lit("totalPcVramBytes")).toVariant().toULongLong();
+  m_OverallSavingsPercent = (float)summaryObj.value(lit("overallSavingsPercent")).toDouble();
+
+  if(m_MobileVramBtn)
+  {
+    if(!m_AndroidTexByRes.isEmpty() || !m_AndroidTexByDim.isEmpty())
+    {
+      m_MobileVramBtn->setVisible(true);
+      m_MobileVramBtn->setText(
+          tr("📱 Mobile VRAM (%1 saved)").arg(QString::number(m_OverallSavingsPercent, 'f', 0) + lit("%")));
+    }
+    else
+    {
+      m_MobileVramBtn->setVisible(false);
+    }
+  }
+}
+
+void TextureViewer::ShowMobileVramReport()
+{
+  double androidMB = (double)m_TotalAndroidVram / (1024.0 * 1024.0);
+  double pcMB = (double)m_TotalPcVram / (1024.0 * 1024.0);
+  double savedMB = pcMB > androidMB ? pcMB - androidMB : 0.0;
+
+  QString report =
+      tr("=== Android Mobile Compressed Texture Report ===\n\n"
+         "Total Mobile Textures:  %1\n"
+         "Original Mobile VRAM:   %2 MB (%3 bytes)\n"
+         "PC Emulated VRAM:       %4 MB (%5 bytes)\n"
+         "VRAM Saved on Mobile:   %6 MB (%7%)\n\n"
+         "Compression Formats: ASTC (4x4 ~ 12x12), ETC2/EAC\n"
+         "Companion Manifest: Co-located next to .rdc capture file.")
+          .arg(m_AndroidTexByRes.size() > 0 ? m_AndroidTexByRes.size() : m_AndroidTexByDim.size())
+          .arg(androidMB, 0, 'f', 2)
+          .arg(m_TotalAndroidVram)
+          .arg(pcMB, 0, 'f', 2)
+          .arg(m_TotalPcVram)
+          .arg(savedMB, 0, 'f', 2)
+          .arg(m_OverallSavingsPercent, 0, 'f', 1);
+
+  RDDialog::information(this, tr("Mobile Compressed Texture Report"), report);
 }
 
 #if ENABLE_UNIT_TESTS

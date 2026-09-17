@@ -25,6 +25,7 @@
 #include <algorithm>
 #include "../vk_core.h"
 #include "../vk_debug.h"
+#include "../mumu_gles_interceptor.h"
 #include "core/settings.h"
 
 RDOC_CONFIG(bool, Vulkan_GPUReadbackDeviceLocal, true,
@@ -3007,6 +3008,51 @@ VkResult WrappedVulkan::vkCreateImage(VkDevice device, const VkImageCreateInfo *
       record->resInfo = new ResourceInfo();
       ResourceInfo &resInfo = *record->resInfo;
       resInfo.imageInfo = ImageInfo(*pCreateInfo);
+
+      CompressedTexMetadata compMeta;
+      if(MuMuGLESInterceptor::Inst().MatchCompressedTex(pCreateInfo->extent.width,
+                                                        pCreateInfo->extent.height, compMeta))
+      {
+        MuMuGLESInterceptor::Inst().RegisterVulkanImage(GetResID(*pImage), compMeta);
+
+        rdcstr customName;
+        if(compMeta.isVideo)
+        {
+          if(compMeta.videoFps > 0.0f)
+          {
+            customName = StringFormat::Fmt(
+                "Image %s [VIDEO: %s | Raw: %s | %ux%u @ %.0f FPS (#%u) | VRAM: %.1f MB]",
+                ToStr(GetResID(*pImage)).c_str(), compMeta.videoCodec.c_str(),
+                compMeta.videoPixelFormat.c_str(), compMeta.width, compMeta.height,
+                compMeta.videoFps, compMeta.videoFrameCount,
+                (float)compMeta.uncompressedSize / (1024.0f * 1024.0f));
+          }
+          else
+          {
+            customName = StringFormat::Fmt(
+                "Image %s [VIDEO: %s | Raw: %s | %ux%u (#%u) | VRAM: %.1f MB]",
+                ToStr(GetResID(*pImage)).c_str(), compMeta.videoCodec.c_str(),
+                compMeta.videoPixelFormat.c_str(), compMeta.width, compMeta.height,
+                compMeta.videoFrameCount,
+                (float)compMeta.uncompressedSize / (1024.0f * 1024.0f));
+          }
+        }
+        else
+        {
+          customName = StringFormat::Fmt(
+              "Image %s [Android: %s | VRAM: %.1f KB | Saved: %.0f%%]",
+              ToStr(GetResID(*pImage)).c_str(), compMeta.GetFormatString(),
+              (float)compMeta.imageSize / 1024.0f,
+              (1.0f - compMeta.GetCompressionRatio()) * 100.0f);
+        }
+
+        VkDebugUtilsObjectNameInfoEXT nameInfo = {};
+        nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+        nameInfo.objectType = VK_OBJECT_TYPE_IMAGE;
+        nameInfo.objectHandle = NON_DISP_TO_UINT64(*pImage);
+        nameInfo.pObjectName = customName.c_str();
+        this->vkSetDebugUtilsObjectNameEXT(device, &nameInfo);
+      }
 
       record->storable = (pCreateInfo->usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
 

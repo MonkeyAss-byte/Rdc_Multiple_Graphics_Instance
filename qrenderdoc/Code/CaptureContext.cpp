@@ -1394,6 +1394,22 @@ bool CaptureContext::SaveCaptureTo(const rdcstr &captureFile)
     return false;
   }
 
+  // Also copy companion manifest if it exists
+  QString oldManifest = m_CaptureFile + lit(".manifest.json");
+  QString newManifest = QString::fromUtf8(captureFile.c_str()) + lit(".manifest.json");
+  if(QFile::exists(oldManifest))
+  {
+    QFile::remove(newManifest);
+    QFile::copy(oldManifest, newManifest);
+    if(m_CaptureTemporary)
+      QFile::remove(oldManifest);
+  }
+  else if(QFile::exists(lit("E:/Task/RDC_Res/latest.manifest.json")))
+  {
+    QFile::remove(newManifest);
+    QFile::copy(lit("E:/Task/RDC_Res/latest.manifest.json"), newManifest);
+  }
+
   // if it was a temporary capture, remove the old instnace
   if(m_CaptureTemporary)
   {

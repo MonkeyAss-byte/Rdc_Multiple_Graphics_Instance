@@ -41,6 +41,7 @@ class QItemSelection;
 class QMenu;
 class QPushButton;
 class QVBoxLayout;
+class QLabel;
 class RDLabel;
 class RDTableView;
 class RDSplitter;
@@ -134,6 +135,7 @@ private slots:
   void on_exploderReset_clicked();
   void on_exploderScale_valueChanged(double value);
   void on_wireframeRender_toggled(bool checked);
+  void on_boneConfigBtn_clicked();
   void on_visualisation_currentIndexChanged(int index);
   void on_drawRange_currentIndexChanged(int index);
   void on_controlType_currentIndexChanged(int index);
@@ -379,4 +381,65 @@ private:
   void ScrollToColumn(RDTableView *view, int column);
 
   bool showAxisMappingDialog();
+
+public:
+  struct BoneStreamConfig
+  {
+    enum class BoneAddressing
+    {
+      PerVertex = 0,
+      PerIndex = 1,
+    };
+
+    bool enabled = false;
+    ResourceId bufferId;
+    uint32_t stride = 32;
+    uint32_t weightOffset = 0;
+    ResourceFormat weightFormat;
+    uint32_t indexOffset = 16;
+    ResourceFormat indexFormat;
+    BoneAddressing addressing = BoneAddressing::PerVertex;
+
+    BoneStreamConfig()
+    {
+      weightFormat.type = ResourceFormatType::Regular;
+      weightFormat.compCount = 4;
+      weightFormat.compByteWidth = 4;
+      weightFormat.compType = CompType::Float;
+
+      indexFormat.type = ResourceFormatType::Regular;
+      indexFormat.compCount = 4;
+      indexFormat.compByteWidth = 4;
+      indexFormat.compType = CompType::SInt;
+    }
+  };
+  using BoneAddressing = BoneStreamConfig::BoneAddressing;
+
+  struct VertexBoneInfo
+  {
+    float weights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t indices[4] = {0, 0, 0, 0};
+    uint32_t activeCount = 0;
+    float weightSum = 0.0f;
+    float dotVal = 0.0f;
+  };
+
+private:
+  BoneStreamConfig m_BoneConfig;
+  QFrame *m_BoneHud = NULL;
+  QLabel *m_BoneHudText = NULL;
+  bytebuf m_BoneBufferData;
+  int m_PickedVertex = -1;
+  int m_PickedRow = -1;
+  uint32_t m_PickedVertexId = 0;
+  uint32_t m_TotalBoneCount = 0;
+  uint32_t m_MinBoneId = 0;
+  uint32_t m_MaxBoneId = 0;
+
+  void UpdateBoneBufferData();
+  void AnalyzeBoneStream();
+  void UpdateBoneHudText();
+  uint32_t GetMeshVertexCount() const;
+  uint32_t GetMeshIndexCount() const;
+  VertexBoneInfo UnpackVertexBoneInfo(uint64_t offset) const;
 };

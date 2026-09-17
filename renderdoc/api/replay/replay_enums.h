@@ -3182,6 +3182,9 @@ enum class Visualisation : uint32_t
   Secondary,
   Explode,
   Meshlet,
+  BoneIndex,
+  BoneWeight,
+  BoneCount,
   Count,
 };
 

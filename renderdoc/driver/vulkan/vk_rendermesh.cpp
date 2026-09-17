@@ -44,6 +44,12 @@ static int VisModeToMeshDisplayFormat(Visualisation vis, bool showAlpha)
     default: return (int)vis;
     case Visualisation::Secondary:
       return showAlpha ? MESHDISPLAY_SECONDARY_ALPHA : MESHDISPLAY_SECONDARY;
+    case Visualisation::BoneIndex:
+      return MESHDISPLAY_BONE_INDEX;
+    case Visualisation::BoneWeight:
+      return MESHDISPLAY_BONE_WEIGHT;
+    case Visualisation::BoneCount:
+      return MESHDISPLAY_BONE_COUNT;
   }
 }
 
@@ -426,9 +432,20 @@ VKMeshDisplayPipelines VulkanDebugManager::CacheMeshDisplayPipelines(VkPipelineL
 
     vi.vertexBindingDescriptionCount = 2;
 
+    BuiltinShaderBaseType baseType = BuiltinShaderBaseType::Float;
+    if(IsUIntFormat(secondaryFmt))
+      baseType = BuiltinShaderBaseType::UInt;
+    else if(IsSIntFormat(secondaryFmt))
+      baseType = BuiltinShaderBaseType::SInt;
+
+    stages[0].module =
+        Unwrap(m_pDriver->GetShaderCache()->GetBuiltinModule(BuiltinShader::MeshVS, baseType));
+
     vkr = vt->CreateGraphicsPipelines(Unwrap(m_Device), VK_NULL_HANDLE, 1, &pipeInfo, NULL,
                                       &cache.pipes[VKMeshDisplayPipelines::ePipe_Secondary]);
     CHECK_VKR(m_pDriver, vkr);
+
+    stages[0].module = Unwrap(m_pDriver->GetShaderCache()->GetBuiltinModule(BuiltinShader::MeshVS));
   }
 
   vertAttrs[1].binding = 0;
@@ -548,10 +565,14 @@ void VulkanReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &seco
   }
 
   // can't support secondary shading without a buffer - no pipeline will have been created
-  const Visualisation finalVisualisation = (cfg.visualisationMode == Visualisation::Secondary &&
-                                            cfg.second.vertexResourceId == ResourceId())
-                                               ? Visualisation::NoSolid
-                                               : cfg.visualisationMode;
+  const bool isSecondaryOrBone = (cfg.visualisationMode == Visualisation::Secondary ||
+                                  cfg.visualisationMode == Visualisation::BoneIndex ||
+                                  cfg.visualisationMode == Visualisation::BoneWeight ||
+                                  cfg.visualisationMode == Visualisation::BoneCount);
+  const Visualisation finalVisualisation =
+      (isSecondaryOrBone && cfg.second.vertexResourceId == ResourceId())
+          ? Visualisation::NoSolid
+          : cfg.visualisationMode;
 
   MeshUBOData meshUniforms = {};
   meshUniforms.mvp = ModelViewProj;
@@ -703,7 +724,10 @@ void VulkanReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &seco
     vt->CmdBindVertexBuffers(Unwrap(cmd), 0, 1, UnwrapPtr(vb), &offs);
   }
 
-  if(finalVisualisation == Visualisation::Secondary)
+  if(finalVisualisation == Visualisation::Secondary ||
+     finalVisualisation == Visualisation::BoneIndex ||
+     finalVisualisation == Visualisation::BoneWeight ||
+     finalVisualisation == Visualisation::BoneCount)
   {
     VkBuffer vb =
         m_pDriver->GetResourceManager()->GetCurrentHandle<VkBuffer>(cfg.second.vertexResourceId);
@@ -739,6 +763,9 @@ void VulkanReplay::RenderMesh(uint32_t eventId, const rdcarray<MeshFormat> &seco
           pipe = cache.pipes[VKMeshDisplayPipelines::ePipe_SolidDepth];
         break;
       case Visualisation::Secondary:
+      case Visualisation::BoneIndex:
+      case Visualisation::BoneWeight:
+      case Visualisation::BoneCount:
         pipe = cache.pipes[VKMeshDisplayPipelines::ePipe_Secondary];
         break;
       case Visualisation::Meshlet:

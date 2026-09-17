@@ -126,8 +126,21 @@ private:
     None,
     Textures,
     RenderTargets,
+    MobileCompressed,
     String
   };
+
+  struct AndroidTexInfo
+  {
+    QString format;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint64_t androidBytes = 0;
+    uint64_t pcBytes = 0;
+    float savingsPercent = 0.0f;
+  };
+
+  bool GetAndroidTexInfo(ResourceId id, uint32_t width, uint32_t height, AndroidTexInfo &outInfo) const;
 
 public:
   explicit TextureViewer(ICaptureContext &ctx, QWidget *parent = 0);
@@ -265,6 +278,9 @@ private:
 
   void refreshTextureList();
   void refreshTextureList(FilterType filterType, const QString &filterStr);
+  void addToRoot(RDTreeWidgetItem *root, const TextureDescription &t);
+  void LoadAndroidTexManifest();
+  void ShowMobileVramReport();
 
   ResourcePreview *UI_CreateThumbnail(ThumbnailStrip *strip);
   void UI_CreateThumbnails();
@@ -385,4 +401,11 @@ private:
   QString getShaderPath(const QString &filename) const;
 
   TextureDisplay m_TexDisplay;
+
+  QMap<QString, AndroidTexInfo> m_AndroidTexByRes;
+  QMap<QPair<uint32_t, uint32_t>, AndroidTexInfo> m_AndroidTexByDim;
+  uint64_t m_TotalAndroidVram = 0;
+  uint64_t m_TotalPcVram = 0;
+  float m_OverallSavingsPercent = 0.0f;
+  QToolButton *m_MobileVramBtn = NULL;
 };

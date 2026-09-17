@@ -40,6 +40,12 @@ static int VisModeToMeshDisplayFormat(const MeshDisplay &cfg)
     default: return (int)cfg.visualisationMode;
     case Visualisation::Secondary:
       return cfg.second.showAlpha ? MESHDISPLAY_SECONDARY_ALPHA : MESHDISPLAY_SECONDARY;
+    case Visualisation::BoneIndex:
+      return MESHDISPLAY_BONE_INDEX;
+    case Visualisation::BoneWeight:
+      return MESHDISPLAY_BONE_WEIGHT;
+    case Visualisation::BoneCount:
+      return MESHDISPLAY_BONE_COUNT;
   }
 }
 

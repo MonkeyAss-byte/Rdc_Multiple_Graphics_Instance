@@ -66,6 +66,17 @@ void main(void)
 
     color_out = vec4(SECONDARY_NAME.xyz * abs(dot(lightDir, NORM_NAME.xyz)), 1);
   }
+  else if(type == MESHDISPLAY_BONE_COUNT || type == MESHDISPLAY_BONE_INDEX)
+  {
+    color_out = vec4(SECONDARY_NAME.xyz, 1);
+  }
+  else if(type == MESHDISPLAY_BONE_WEIGHT)
+  {
+    float w = max(max(SECONDARY_NAME.x, SECONDARY_NAME.y), max(SECONDARY_NAME.z, SECONDARY_NAME.w));
+    w = clamp(w, 0.0, 1.0);
+    vec3 c = clamp(vec3(1.5) - abs(vec3(w) * 4.0 - vec3(3.0, 2.0, 1.0)), 0.0, 1.0);
+    color_out = vec4(c, 1.0);
+  }
   else    // if(type == MESHDISPLAY_SOLID)
   {
     color_out = vec4(Mesh.color.xyz, 1);

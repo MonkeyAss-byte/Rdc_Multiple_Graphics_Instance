@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Development|Win32">
@@ -133,6 +133,7 @@
     </ClCompile>
     <ClCompile Include="vk_common.cpp" />
     <ClCompile Include="vk_core.cpp" />
+    <ClCompile Include="mumu_gles_interceptor.cpp" />
     <ClCompile Include="vk_debug.cpp" />
     <ClCompile Include="vk_info.cpp" />
     <ClCompile Include="vk_manager.cpp" />
@@ -183,6 +184,7 @@
     <ClInclude Include="vk_acceleration_structure.h" />
     <ClInclude Include="vk_common.h" />
     <ClInclude Include="vk_core.h" />
+    <ClInclude Include="mumu_gles_interceptor.h" />
     <ClInclude Include="vk_debug.h" />
     <ClInclude Include="vk_dispatchtables.h" />
     <ClInclude Include="vk_dispatch_defs.h" />

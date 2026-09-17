@@ -317,6 +317,16 @@
             <widget class="QComboBox" name="visualisation"/>
            </item>
            <item>
+            <widget class="QToolButton" name="boneConfigBtn">
+             <property name="toolTip">
+              <string>Configure and bind Bone Weights &amp; Indices buffer</string>
+             </property>
+             <property name="text">
+              <string>Bone Stream...</string>
+             </property>
+            </widget>
+           </item>
+           <item>
             <widget class="QToolButton" name="wireframeRender">
              <property name="enabled">
               <bool>true</bool>
